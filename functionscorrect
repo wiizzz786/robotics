@@ -1,0 +1,46 @@
+void setup(){
+  pinMode(11, OUTPUT);
+  pinMode(10, OUTPUT);
+  pinMode(6, OUTPUT);
+  pinMode(5, OUTPUT);
+
+}
+
+void stopAll() {
+  digitalWrite(10, LOW);
+  digitalWrite(11, LOW);
+  digitalWrite(5, LOW);
+  digitalWrite(6, LOW);
+}
+
+void left() {
+  digitalWrite(10, LOW);
+  digitalWrite(11, HIGH);
+  digitalWrite(5, HIGH);
+  digitalWrite(6, LOW);
+}
+
+void right() {
+  digitalWrite(10, LOW);
+  digitalWrite(11, HIGH);
+  digitalWrite(5, HIGH);
+  digitalWrite(6, LOW);
+}
+
+void forward() {
+  digitalWrite(10, HIGH);
+  digitalWrite(11, LOW);
+  digitalWrite(6, LOW);
+  digitalWrite(5, HIGH);
+}
+
+void backward() {
+  digitalWrite(10, LOW);
+  digitalWrite(11, HIGH);
+  digitalWrite(5, LOW);
+  digitalWrite(6, HIGH);
+}
+
+void loop() {
+  forward();
+}
