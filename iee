@@ -1,0 +1,168 @@
+
+ 
+#include "mpu6500.h"
+
+/* Mpu6500 object */
+bfs::Mpu6500 imu;
+
+// --- Global variables for MPU-6500 calibration biases ---
+float accelBiasX = 0.0;
+float accelBiasY = 0.0;
+float accelBiasZ = 0.0;
+
+float gyroBiasX = 0.0;
+float gyroBiasY = 0.0;
+float gyroBiasZ = 0.0;
+
+// --- Pin Definitions for Ultrasonic Sensor (HC-SR04) ---
+#define ULTRASONIC_TRIG_PIN 9  // Arduino digital pin connected to Trig pin on HC-SR04
+#define ULTRASONIC_ECHO_PIN 10 // Arduino digital pin connected to Echo pin on HC-SR04
+
+void setup() {
+  /* Serial to display data */
+  Serial.begin(115200);
+  while (!Serial) {} // Wait for serial monitor to open
+
+  /* Start the I2C bus for MPU-6500 */
+  Wire.begin();
+  Wire.setClock(400000); // Set I2C clock speed to 400kHz
+
+  /* MPU-6500 I2C bus configuration */
+  imu.Config(&Wire, bfs::Mpu6500::I2C_ADDR_PRIM); // Default address 0x68
+
+  /* Initialize and configure MPU-6500 IMU */
+  if (!imu.Begin()) {
+    Serial.println("Error initializing communication with MPU-6500 IMU");
+    while (1) {} // Halt if MPU-6500 initialization fails
+  }
+
+  /* Set the MPU-6500 sample rate divider (SRD) */
+  // A SRD of 19 means (1000Hz / (19 + 1)) = 50Hz sample rate
+  if (!imu.ConfigSrd(19)) {
+    Serial.println("Error configuring SRD for MPU-6500");
+    while (1) {} // Halt if SRD config fails
+  }
+
+  // --- Start of User-Defined Bias Calibration Routine for MPU-6500 ---
+  Serial.println("\n--- Starting Gyro & Accel Calibration ---");
+  Serial.println("Keep the MPU-6500 sensor perfectly still and horizontal for 5 seconds.");
+  delay(3000); // Give user time to place sensor and read message
+
+  int numCalibrationSamples = 2000; // Number of samples to average for calibration
+  float tempSumAx = 0, tempSumAy = 0, tempSumAz = 0;
+  float tempSumGx = 0, tempSumGy = 0, tempSumGz = 0;
+
+  // Read and discard initial samples to stabilize readings
+  Serial.println("Collecting initial stable MPU-6500 readings...");
+  for (int i = 0; i < 100; i++) {
+    if (imu.Read()) {
+      // Just read, don't use these for calibration
+    }
+    delay(5); // Small delay to allow new data to be available
+  }
+
+  Serial.print("Collecting "); Serial.print(numCalibrationSamples); Serial.println(" calibration samples for MPU-6500...");
+  for (int i = 0; i < numCalibrationSamples; i++) {
+    if (imu.Read()) { // Attempt to read new data from the IMU
+      tempSumAx += imu.accel_x_mps2();
+      tempSumAy += imu.accel_y_mps2();
+      tempSumAz += imu.accel_z_mps2();
+
+      tempSumGx += imu.gyro_x_radps();
+      tempSumGy += imu.gyro_y_radps();
+      tempSumGz += imu.gyro_z_radps();
+    } else {
+      Serial.println("Warning: MPU-6500 read failed during calibration sample collection.");
+    }
+    delay(2); // Small delay between samples
+  }
+
+  // Calculate the average of the collected samples to find the biases
+  accelBiasX = tempSumAx / numCalibrationSamples;
+  accelBiasY = tempSumAy / numCalibrationSamples;
+  accelBiasZ = tempSumAz / numCalibrationSamples;
+
+  gyroBiasX = tempSumGx / numCalibrationSamples;
+  gyroBiasY = tempSumGy / numCalibrationSamples;
+  gyroBiasZ = tempSumGz / numCalibrationSamples;
+
+  // IMPORTANT ACCELEROMETER Z-AXIS ADJUSTMENT:
+  // Subtract 9.81 m/s^2 from Z-axis bias if you want it to read ~0 when flat (compensating for gravity).
+  // Comment out the line below if you want Z-axis to read ~9.81 m/s^2 when flat.
+  accelBiasZ -= 9.81;
+
+  Serial.println("--- MPU-6500 Calibration Complete ---");
+  Serial.print("Accel Biases (m/s^2): X="); Serial.print(accelBiasX, 4);
+  Serial.print(" Y="); Serial.print(accelBiasY, 4);
+  Serial.print(" Z="); Serial.println(accelBiasZ, 4);
+
+  Serial.print("Gyro Biases (rad/s): X="); Serial.print(gyroBiasX, 4);
+  Serial.print(" Y="); Serial.print(gyroBiasY, 4);
+  Serial.print(" Z="); Serial.println(gyroBiasZ, 4);
+  Serial.println("-------------------------------------\n");
+  // --- End of MPU-6500 Calibration Routine ---
+
+  // --- Setup for Ultrasonic Sensor ---
+  pinMode(ULTRASONIC_TRIG_PIN, OUTPUT); // Sets the Trig pin as an Output
+  pinMode(ULTRASONIC_ECHO_PIN, INPUT);  // Sets the Echo pin as an Input
+  Serial.println("Ultrasonic Sensor initialized.");
+  // -----------------------------------
+}
+
+void loop() {
+  /* Check if new MPU-6500 data is available */
+  if (imu.Read()) {
+    // Read and apply biases to MPU-6500 data
+    float currentAccelX = imu.accel_x_mps2() - accelBiasX;
+    float currentAccelY = imu.accel_y_mps2() - accelBiasY;
+    float currentAccelZ = imu.accel_z_mps2() - accelBiasZ;
+
+    float currentGyroX = imu.gyro_x_radps() - gyroBiasX;
+    float currentGyroY = imu.gyro_y_radps() - gyroBiasY;
+    float currentGyroZ = imu.gyro_z_radps() - gyroBiasZ;
+
+    // Print MPU-6500 data
+    Serial.print(millis()); // Using millis() as a common timestamp
+    Serial.print("\tAx:"); Serial.print(currentAccelX, 4);
+    Serial.print("\tAy:"); Serial.print(currentAccelY, 4);
+    Serial.print("\tAz:"); Serial.print(currentAccelZ, 4);
+    Serial.print("\tGx:"); Serial.print(currentGyroX, 4);
+    Serial.print("\tGy:"); Serial.print(currentGyroY, 4);
+    Serial.print("\tGz:"); Serial.print(currentGyroZ, 4);
+    Serial.print("\tTemp:"); Serial.print(imu.die_temp_c(), 2);
+    // Note: No newline here, we'll add it after ultrasonic data
+  } else {
+    Serial.print(millis());
+    Serial.println("\tMPU-6500 read failed!");
+  }
+
+  // --- Read from Ultrasonic Sensor ---
+  long duration;
+  float distanceCm;
+
+  // Clears the Trig pin condition
+  digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  // Sets the Trig pin HIGH (ACTIVE) for 10 microseconds
+  digitalWrite(ULTRASONIC_TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
+
+  // Reads the Echo pin, returns the sound wave travel time in microseconds
+  duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH);
+
+  // Calculate the distance in centimeters
+  // Speed of sound is approx. 343 meters/second, or 0.0343 cm/microsecond.
+  // The pulse travels to the object AND BACK, so divide duration by 2.
+  distanceCm = duration * 0.0343 / 2;
+
+  // Print Ultrasonic Sensor data and add newline
+  Serial.print("\tDist:");
+  Serial.print(distanceCm, 2); // Print with 2 decimal places
+  Serial.println(" cm");
+
+  // A small delay to control the data rate and avoid overwhelming the Serial Monitor
+  // Adjust this based on how fast you need new readings
+  delay(50); // Example delay, results in approx 20 readings per second
+}
