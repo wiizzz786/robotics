@@ -7,24 +7,25 @@
 // and triggers a siren alarm.
 // All processing is done directly on the Arduino Uno.
 //
-// This version uses the 'SparkFunMPU9250-DMP' library for the IMU.
+// This version uses the 'I2Cdevlib' library for the MPU6050 IMU.
 //
 // Author: Gemini
-// Date: July 23, 2025 (Adapted for MPU6050, no LCD)
+// Date: July 23, 2025 (Adapted for MPU6050 with I2Cdevlib, no LCD)
 // =======================================================================
 
 // --- Libraries ---
-// You will need to install the SparkFun MPU9250-DMP library (which also works for MPU6050/6500).
+// You will need to install the I2Cdevlib library by Jeff Rowberg.
 // In Arduino IDE, go to Sketch > Include Library > Manage Libraries...
-// Search for "SparkFun MPU9250-DMP" and install it.
-#include <Wire.h>             // Required for I2C communication with MPU6050
-#include <SparkFunMPU9250-DMP.h> // Library for MPU6050/6500/9250/9255 IMU
+// Search for "I2Cdevlib" and install it.
+#include <Wire.h>     // Required for I2C communication with MPU6050
+#include <I2Cdev.h>   // I2Cdev library for common I2C functions
+#include <MPU6050.h>  // MPU6050 class from I2Cdevlib
 
 // --- Pin Definitions ---
 // MPU6050 IMU (I2C communication)
 // SDA (Data) connects to Arduino Analog Pin A4
 // SCL (Clock) connects to Arduino Analog Pin A5
-// AD0 pin on MPU6050 should be connected to GND for I2C address 0x68
+// AD0 pin on MPU6050 should be connected to GND for I2C address 0x68 (default)
 
 const int SPEAKER_PIN = 6;     // Digital pin connected to the speaker/buzzer
 const int BUTTON_PIN = 2;      // Digital pin connected to the push button
@@ -32,7 +33,7 @@ const int READY_LED = 3;       // Green LED - System ready/normal operation
 const int ALARM_LED = 4;       // Red LED - Fall detected / Alarm active
 
 // --- Sensor Variables ---
-MPU9250 mpu; // Create an MPU9250 object (this library works for MPU6050)
+MPU6050 mpu; // Create an MPU6050 object
 
 // --- IMU Calibration Offsets (REQUIRED FOR ACCURATE GYRO) ---
 // These values will be calculated during the setup() routine by averaging readings
@@ -110,7 +111,8 @@ void setup() {
   Wire.setClock(400000); // Set I2C clock to 400kHz (Fast Mode) for faster data transfer
 
   Serial.print("Initializing MPU6050 IMU...");
-  if (mpu.begin() != INV_SUCCESS) { // MPU9250 library uses INV_SUCCESS for success
+  mpu.initialize(); // Initialize the MPU6050 sensor
+  if (!mpu.testConnection()) { // Check if the connection is successful
     Serial.println("FAILED! Check IMU wiring (SDA to A4, SCL to A5, VCC, GND).");
     Serial.println("Also confirm I2C address (0x68).");
     while (1) { // Loop indefinitely if IMU fails to initialize
@@ -118,11 +120,13 @@ void setup() {
       delay(200);
     }
   }
-  // Configure MPU6050 ranges (optional, but good practice)
-  mpu.setAccelRange(MPU9250::ACCEL_RANGE_8G);   // Set accelerometer range to +/- 8G
-  mpu.setGyroRange(MPU9250::GYRO_RANGE_1000DPS); // Set gyro range to +/- 1000 deg/s
-  mpu.setDlpfBandwidth(MPU9250::DLPF_BANDWIDTH_20_HZ); // Set digital low pass filter
   Serial.println("SUCCESS!");
+
+  // Configure MPU6050 ranges (optional, but good practice)
+  // These settings affect the raw values, but the library often scales them to G's and deg/s automatically.
+  mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_8);   // Set accelerometer range to +/- 8G
+  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_1000); // Set gyro range to +/- 1000 deg/s
+  // mpu.setDLPFMode(MPU6050_DLPF_BW_20); // Set digital low pass filter (adjust as needed)
 
   // --- Gyroscope Calibration Routine ---
   // Gyroscopes tend to drift over time. Calibration removes this bias.
@@ -132,17 +136,17 @@ void setup() {
   delay(2000); // Give the user 2 seconds to place the sensor still before readings begin
 
   long sumX = 0, sumY = 0, sumZ = 0;
+  int16_t rawGx, rawGy, rawGz; // Raw gyroscope readings
   int numReadings = 1000; // Number of readings to average for calibration accuracy
 
   for (int i = 0; i < numReadings; i++) {
-    if (mpu.gyroAvailable()) { // Check if new gyro data is available
-      mpu.readGyro();
-      sumX += (long)(mpu.gx * 1000); // Multiply by 1000 for precision with integers
-      sumY += (long)(mpu.gy * 1000);
-      sumZ += (long)(mpu.gz * 1000);
-    } else {
-      i--; // Don't count if no new data was available
-    }
+    mpu.getRotation(&rawGx, &rawGy, &rawGz); // Read raw gyroscope values
+    // The MPU6050 library's getRotation returns raw values.
+    // We need to convert them to dps for calibration.
+    // For MPU6050_GYRO_FS_1000, sensitivity is 32.8 LSB/deg/s. So, divide by 32.8.
+    sumX += (long)((float)rawGx / 32.8 * 1000); // Scale by 1000 for precision
+    sumY += (long)((float)rawGy / 32.8 * 1000);
+    sumZ += (long)((float)rawGz / 32.8 * 1000);
     delay(5); // Small delay between readings
   }
 
@@ -173,22 +177,32 @@ void setup() {
 // =======================================================================
 void loop() {
   // --- Read IMU Sensor Data ---
-  // Read both accelerometer and gyroscope for fall detection
-  if (mpu.accelAvailable()) {
-    mpu.readAccel();
-  }
-  if (mpu.gyroAvailable()) {
-    mpu.readGyro();
-  }
+  int16_t rawAx, rawAy, rawAz; // Raw accelerometer readings
+  int16_t rawGx, rawGy, rawGz; // Raw gyroscope readings
+
+  mpu.getAcceleration(&rawAx, &rawAy, &rawAz); // Read raw accelerometer values
+  mpu.getRotation(&rawGx, &rawGy, &rawGz);     // Read raw gyroscope values
+
+  // Convert raw accelerometer values to G's
+  // For MPU6050_ACCEL_FS_8, sensitivity is 4096 LSB/g. So, divide by 4096.0.
+  float ax = (float)rawAx / 4096.0;
+  float ay = (float)rawAy / 4096.0;
+  float az = (float)rawAz / 4096.0;
+
+  // Convert raw gyroscope values to degrees per second (dps)
+  // For MPU6050_GYRO_FS_1000, sensitivity is 32.8 LSB/deg/s. So, divide by 32.8.
+  float gx = (float)rawGx / 32.8;
+  float gy = (float)rawGy / 32.8;
+  float gz = (float)rawGz / 32.8;
 
   // Calculate magnitude of acceleration (total force)
   // This helps detect sudden impacts or freefall regardless of orientation
-  float accelMagnitude = sqrt(sq(mpu.ax) + sq(mpu.ay) + sq(mpu.az));
+  float accelMagnitude = sqrt(sq(ax) + sq(ay) + sq(az));
 
   // Apply calibration offsets to gyroscope readings and calculate magnitude
-  float calibratedGyroX = mpu.gx - gyroX_offset;
-  float calibratedGyroY = mpu.gy - gyroY_offset;
-  float calibratedGyroZ = mpu.gz - gyroZ_offset;
+  float calibratedGyroX = gx - gyroX_offset;
+  float calibratedGyroY = gy - gyroY_offset;
+  float calibratedGyroZ = gz - gyroZ_offset;
   float gyroMagnitude = sqrt(sq(calibratedGyroX) + sq(calibratedGyroY) + sq(calibratedGyroZ));
 
 
@@ -325,3 +339,4 @@ void resetAlarm() {
 
   Serial.println("Alarm silenced. System Ready.");
 }
+
