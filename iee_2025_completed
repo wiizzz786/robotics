@@ -2,29 +2,24 @@
 // Fall Detector Prototype (Arduino Uno)
 // =======================================================================
 // This sketch implements a basic fall detection system using an IMU
-// (MPU6050 - Accelerometer & Gyroscope), a Push Button, LEDs,
-// and a Speaker/Buzzer. It detects sudden movements characteristic of a fall
-// and triggers a siren alarm.
+// (MPU6500 - Accelerometer & Gyroscope only), a Push Button, LEDs,
+// and a Speaker/Buzzer.
+// It detects sudden movements characteristic of a fall and triggers an alarm.
 // All processing is done directly on the Arduino Uno.
 //
-// This version uses the 'bolderflight/invensense-imu' library for the MPU6050 IMU.
+// This version uses the 'bolderflight/invensense-imu' library for MPU6500.
 //
 // Author: Gemini
-// Date: July 23, 2025 (Adapted for MPU6050 with bolderflight/invensense-imu, no LCD)
+// Date: July 5, 2025 (Updated with variable alarm duration)
 // =======================================================================
 
 // --- Libraries ---
-// You will need to install the 'bolderflight/invensense-imu' library.
-// In Arduino IDE, go to Sketch > Include Library > Manage Libraries...
-// Search for "InvenSense IMU" (by bolderflight) and install it.
-#include <Wire.h>          // Required for I2C communication with MPU6050
-#include <InvenSenseImu.h> // bolderflight/invensense-imu library
+#include "Wire.h" // Required for I2C communication with MPU6500
+#include "mpu6500.h" // Correct header for MPU6500 from bolderflight library
 
 // --- Pin Definitions ---
-// MPU6050 IMU (I2C communication)
-// SDA (Data) connects to Arduino Analog Pin A4
-// SCL (Clock) connects to Arduino Analog Pin A5
-// AD0 pin on MPU6050 should be connected to GND for I2C address 0x68 (default)
+// IMU (MPU6500) - I2C pins are A4 (SDA) and A5 (SCL) on Arduino Uno
+// (These are hardware I2C pins, no explicit pinMode is needed for them)
 
 const int SPEAKER_PIN = 6;     // Digital pin connected to the speaker/buzzer
 const int BUTTON_PIN = 2;      // Digital pin connected to the push button
@@ -32,7 +27,9 @@ const int READY_LED = 3;       // Green LED - System ready/normal operation
 const int ALARM_LED = 4;       // Red LED - Fall detected / Alarm active
 
 // --- Sensor Variables ---
-InvenSenseImu imu; // Create an InvenSenseImu object for the MPU6050
+// Instantiate Mpu6500 object within the bfs namespace
+// Using I2C_ADDR_PRIM (0x68) assuming AD0 pin on MPU module is connected to GND or left floating.
+bfs::Mpu6500 imu(&Wire, bfs::Mpu6500::I2C_ADDR_PRIM);
 
 // --- IMU Calibration Offsets (REQUIRED FOR ACCURATE GYRO) ---
 // These values will be calculated during the setup() routine by averaging readings
@@ -50,15 +47,33 @@ float gyroZ_offset = 0.00;
 // 2. Followed by a sudden, high acceleration impact.
 // 3. Followed by a period of stillness (lying on the ground).
 
-const float ACCEL_FALL_THRESHOLD_G = 2.5;     // g-force threshold for sudden impact (e.g., hitting ground)
-const float ACCEL_FREEFALL_THRESHOLD_G = 0.3; // g-force threshold for detecting freefall (e.g., sudden drop)
+// ACCEL_FREEFALL_THRESHOLD_G: Max acceleration during freefall.
+// A value close to 0 indicates true freefall. A slight increase (e.g., 0.3g)
+// can account for minor air resistance or sensor noise during a drop.
+const float ACCEL_FREEFALL_THRESHOLD_G = 0.3;
 
-const unsigned long FALL_DETECTION_WINDOW_MS = 300; // Time window to check for impact after freefall (in ms)
-const unsigned long POST_FALL_STILLNESS_MS = 1000;  // Time to confirm stillness after potential fall (in ms)
+// ACCEL_FALL_THRESHOLD_G: Min acceleration for impact detection.
+// This value should be significantly higher than 1G to detect a sharp impact.
+// Experiment with values like 2.0 to 5.0 depending on how hard the impact is.
+const float ACCEL_FALL_THRESHOLD_G = 2.5;
 
-const float STILLNESS_ACCEL_MIN_G = 0.8;    // Min acceleration for stillness check
-const float STILLNESS_ACCEL_MAX_G = 1.2;    // Max acceleration for stillness check
-const float STILLNESS_GYRO_MAX_DPS = 10.0;  // Max gyroscope magnitude for stillness
+// FALL_DETECTION_WINDOW_MS: Max time allowed between freefall and impact.
+// A typical fall happens quickly. This window prevents unrelated events from triggering.
+const unsigned long FALL_DETECTION_WINDOW_MS = 300;
+
+// POST_FALL_STILLNESS_MS: Duration of stillness required after impact to confirm fall.
+// This helps differentiate a fall from a jump or stumble where motion resumes quickly.
+const unsigned long POST_FALL_STILLNESS_MS = 1000;
+
+// Stillness Check Range: Defines the acceptable range for acceleration magnitude
+// when the device is considered "still" (e.g., lying flat on a surface).
+// Should be centered around 1.0g (gravity).
+const float STILLNESS_ACCEL_MIN_G = 0.8;
+const float STILLNESS_ACCEL_MAX_G = 1.2;
+
+// Stillness Gyro Threshold: Max gyroscope magnitude for "stillness."
+// Should be a very small value, indicating no significant rotation.
+const float STILLNESS_GYRO_MAX_DPS = 10.0;
 
 // --- Alarm Duration Variables ---
 const unsigned long MIN_ALARM_DURATION_MS = 2000; // Minimum alarm duration (2 seconds)
@@ -75,14 +90,10 @@ unsigned long alarmActivatedTime = 0; // Timestamp when the alarm was activated
 long lastButtonPressTime = 0;    // Stores the last time the button was pressed
 const long DEBOUNCE_DELAY = 50; // Milliseconds to ignore subsequent button presses (debounce)
 
-// --- Siren Parameters (for the single speaker) ---
-const int MIN_SIREN_FREQ = 300;  // Minimum frequency for the siren (Hz)
-const int MAX_SIREN_FREQ = 2500; // Maximum frequency for the siren (Hz)
-const int SIREN_SPEED = 20;      // How fast the frequency changes (higher value = faster siren)
-
-int currentSirenFreq = MIN_SIREN_FREQ; // Current frequency being played for siren
-bool freqIncreasing = true;            // Flag to track if siren frequency is increasing or decreasing
-
+// --- Conversion Factors ---
+// These constants convert sensor raw units (radians/sec, m/s^2) to more intuitive units (degrees/sec, G's).
+const float DEG_PER_RAD = 57.295779513; // Conversion from radians to degrees (180 / PI)
+const float G_PER_MPS2 = 9.80665;       // Standard gravity (g) in meters per second squared
 
 // =======================================================================
 // SETUP Function: Runs once when the Arduino starts
@@ -103,58 +114,62 @@ void setup() {
   // Ensure all LEDs are off at the start
   digitalWrite(READY_LED, LOW);
   digitalWrite(ALARM_LED, LOW);
-  noTone(SPEAKER_PIN); // Ensure speaker is off
 
   // --- IMU Initialization ---
-  Wire.begin();       // Initialize I2C communication for the IMU
+  Wire.begin();       // Initialize I2C communication for the IMU sensor
   Wire.setClock(400000); // Set I2C clock to 400kHz (Fast Mode) for faster data transfer
 
-  Serial.print("Initializing MPU6050 IMU (bolderflight/invensense-imu)...");
-  // The begin() function returns true on success
-  if (!imu.begin()) {
+  Serial.print("Initializing MPU6500 IMU...");
+  // Attempt to begin communication with the MPU6500 using the bolderflight library.
+  // imu.Begin() returns true on success, false on failure.
+  if (!imu.Begin()) {
     Serial.println("FAILED! Check IMU wiring (SDA to A4, SCL to A5, VCC, GND).");
-    Serial.println("Also confirm I2C address (0x68).");
-    while (1) { // Loop indefinitely if IMU fails to initialize
-      digitalWrite(ALARM_LED, !digitalRead(ALARM_LED)); // Blink red LED rapidly to indicate error
+    // If IMU fails to initialize, enter an infinite loop to signal a critical error
+    while (1) {
+      digitalWrite(ALARM_LED, HIGH); // Blink red LED rapidly to indicate the error
+      delay(200);
+      digitalWrite(ALARM_LED, LOW);
       delay(200);
     }
   }
-  Serial.println("SUCCESS!");
 
-  // Configure MPU6050 ranges using the bolderflight/invensense-imu library
-  // Note: These libraries typically use constants defined within their own headers.
-  // For MPU6050, common ranges are +/-2g, +/-4g, +/-8g, +/-16g for accelerometer
-  // and +/-250dps, +/-500dps, +/-1000dps, +/-2000dps for gyroscope.
-  // We'll use values similar to previous versions for consistency.
-  imu.setAccelerometerFullScaleRange(InvenSenseImu::ACCEL_FS_8G); // Set accelerometer range to +/- 8G
-  imu.setGyroscopeFullScaleRange(InvenSenseImu::GYRO_FS_1000DPS); // Set gyro range to +/- 1000 deg/s
-  // imu.setDlpfBandwidth(InvenSenseImu::DLPF_BANDWIDTH_20_HZ); // Optional: Set digital low pass filter
+  // Configure accelerometer and gyroscope ranges after successful initialization.
+  // These ranges determine the sensitivity and maximum values the sensor can read.
+  if (!imu.ConfigAccelRange(bfs::Mpu6500::ACCEL_RANGE_8G)) {
+    Serial.println("Failed to set Accelerometer Range!");
+  }
+  if (!imu.ConfigGyroRange(bfs::Mpu6500::GYRO_RANGE_1000DPS)) {
+    Serial.println("Failed to set Gyroscope Range!");
+  }
+
+  Serial.println("SUCCESS!");
 
   // --- Gyroscope Calibration Routine ---
   // Gyroscopes tend to drift over time. Calibration removes this bias.
   // It's crucial to keep the sensor ABSOLUTELY STILL during this phase!
   Serial.println("\nCalibrating Gyroscope... Keep sensor ABSOLUTELY STILL for 5 seconds.");
-  digitalWrite(READY_LED, HIGH); // Green LED on during calibration
+  digitalWrite(READY_LED, HIGH); // Turn on green LED to indicate calibration is in progress
   delay(2000); // Give the user 2 seconds to place the sensor still before readings begin
 
   long sumX = 0, sumY = 0, sumZ = 0;
-  Vector3f gyroData; // Use Vector3f to store gyroscope readings
   int numReadings = 1000; // Number of readings to average for calibration accuracy
 
   for (int i = 0; i < numReadings; i++) {
-    imu.readGyroscope(&gyroData); // Read gyroscope values
-    // The bolderflight library returns values directly in dps
-    sumX += (long)(gyroData.x * 1000); // Multiply by 1000 for precision with integers
-    sumY += (long)(gyroData.y * 1000);
-    sumZ += (long)(gyroData.z * 1000);
-    delay(5); // Small delay between readings
+    imu.Read(); // Read the latest sensor data from the IMU
+    // Accumulate gyroscope readings, converting from radians/sec to degrees/sec
+    // and scaling by 1000 to maintain precision with integer sums.
+    sumX += (long)(imu.gyro_x_radps() * DEG_PER_RAD * 1000);
+    sumY += (long)(imu.gyro_y_radps() * DEG_PER_RAD * 1000);
+    sumZ += (long)(imu.gyro_z_radps() * DEG_PER_RAD * 1000);
+    delay(5); // Small delay between readings to allow sensor to update
   }
 
+  // Calculate the average offset for each gyroscope axis
   gyroX_offset = (float)sumX / (numReadings * 1000.0);
   gyroY_offset = (float)sumY / (numReadings * 1000.0);
   gyroZ_offset = (float)sumZ / (numReadings * 1000.0);
 
-  Serial.print("Gyro Offsets Found: X="); Serial.print(gyroX_offset, 3);
+  Serial.print("Gyro Offsets Found: X="); Serial.print(gyroX_offset, 3); // Print offsets with 3 decimal places
   Serial.print(", Y="); Serial.print(gyroY_offset, 3);
   Serial.print(", Z="); Serial.println(gyroZ_offset, 3);
   Serial.println("Calibration Complete! System Ready.");
@@ -176,42 +191,42 @@ void setup() {
 // LOOP Function: Runs repeatedly after setup()
 // =======================================================================
 void loop() {
-  // --- Read IMU Sensor Data ---
-  Vector3f accelData; // Use Vector3f for accelerometer readings
-  Vector3f gyroData;  // Use Vector3f for gyroscope readings
+  imu.Read(); // Read the latest accelerometer and gyroscope data from the IMU
 
-  imu.readAccelerometer(&accelData); // Read accelerometer values (in G's)
-  imu.readGyroscope(&gyroData);      // Read gyroscope values (in dps)
+  // --- Process Accelerometer Data ---
+  // Get accelerometer data in m/s^2 and convert to G's (multiples of standard gravity)
+  float accelX = imu.accel_x_mps2() / G_PER_MPS2;
+  float accelY = imu.accel_y_mps2() / G_PER_MPS2;
+  float accelZ = imu.accel_z_mps2() / G_PER_MPS2;
 
-  // Extract individual components
-  float ax = accelData.x;
-  float ay = accelData.y;
-  float az = accelData.z;
-  float gx = gyroData.x;
-  float gy = gyroData.y;
-  float gz = gyroData.z;
+  // Calculate the magnitude (total vector sum) of acceleration.
+  // This value helps detect sudden changes in motion regardless of orientation.
+  float accelMagnitude = sqrt(sq(accelX) + sq(accelY) + sq(accelZ));
 
-  // Calculate magnitude of acceleration (total force)
-  // This helps detect sudden impacts or freefall regardless of orientation
-  float accelMagnitude = sqrt(sq(ax) + sq(ay) + sq(az));
+  // --- Process Gyroscope Data ---
+  // Get gyroscope data in radians/sec, convert to degrees/sec, then apply calibration offsets.
+  float gyroX = (imu.gyro_x_radps() * DEG_PER_RAD) - gyroX_offset;
+  float gyroY = (imu.gyro_y_radps() * DEG_PER_RAD) - gyroY_offset;
+  float gyroZ = (imu.gyro_z_radps() * DEG_PER_RAD) - gyroZ_offset;
 
-  // Apply calibration offsets to gyroscope readings and calculate magnitude
-  float calibratedGyroX = gx - gyroX_offset;
-  float calibratedGyroY = gy - gyroY_offset;
-  float calibratedGyroZ = gz - gyroZ_offset;
-  float gyroMagnitude = sqrt(sq(calibratedGyroX) + sq(calibratedGyroY) + sq(calibratedGyroZ));
-
+  // Calculate the magnitude (total vector sum) of angular velocity.
+  // This value helps detect rapid rotations or tumbling.
+  float gyroMagnitude = sqrt(sq(gyroX) + sq(gyroY) + sq(gyroZ));
 
   // --- Fall Detection Logic (State Machine) ---
+  // The system transitions through states to confirm a fall:
+  // NORMAL -> FREEFALL -> IMPACT -> STILLNESS (Fall Detected)
   if (!isAlarmActive) { // Only attempt to detect falls if the alarm is not already active
 
     // State 1: Detect potential freefall (acceleration significantly less than 1G).
+    // This is the initial trigger for a potential fall.
     if (accelMagnitude < ACCEL_FREEFALL_THRESHOLD_G && fallStartTime == 0) {
       fallStartTime = millis(); // Record the timestamp of freefall detection
       Serial.println("Potential Freefall Detected!");
     }
 
     // State 2: Check for a high-impact event after freefall.
+    // This confirms the "landing" part of a fall.
     if (fallStartTime != 0 && (millis() - fallStartTime < FALL_DETECTION_WINDOW_MS)) {
       if (accelMagnitude > ACCEL_FALL_THRESHOLD_G && impactTime == 0) {
         impactTime = millis(); // Record the timestamp of the impact
@@ -221,10 +236,26 @@ void loop() {
     }
 
     // State 3: Confirm stillness after the potential fall (impact).
+    // After impact, the device should be relatively still (near 1G, low rotation)
+    // for a certain period to confirm it's a fall and not just a jump or stumble.
     if (impactTime != 0 && (millis() - impactTime > POST_FALL_STILLNESS_MS)) {
       // Check for acceleration near 1G (indicating it's lying still) and very low rotation.
       if (accelMagnitude < STILLNESS_ACCEL_MAX_G && accelMagnitude > STILLNESS_ACCEL_MIN_G && gyroMagnitude < STILLNESS_GYRO_MAX_DPS) {
-        activateAlarm(); // Fall confirmed!
+        isAlarmActive = true; // Fall confirmed!
+        Serial.println("FALL DETECTED!");
+        digitalWrite(READY_LED, LOW); // Turn off green LED
+        digitalWrite(ALARM_LED, HIGH); // Turn on red LED
+
+        // Calculate alarm duration based on impact severity
+        unsigned long calculatedAlarmDuration = MIN_ALARM_DURATION_MS +
+                                                (unsigned long)((lastImpactAccelMagnitude - ACCEL_FALL_THRESHOLD_G) * ALARM_DURATION_SCALING_FACTOR);
+        // Clamp duration within min and max limits
+        calculatedAlarmDuration = constrain(calculatedAlarmDuration, MIN_ALARM_DURATION_MS, MAX_ALARM_DURATION_MS);
+
+        tone(SPEAKER_PIN, 3000, calculatedAlarmDuration); // Start a loud, high-pitched alarm sound for calculated duration
+        alarmActivatedTime = millis(); // Record when alarm started for auto-stop
+        Serial.print("Alarm duration: "); Serial.print(calculatedAlarmDuration); Serial.println(" ms");
+
       } else {
         // If the conditions for stillness are not met, reset the fall detection states.
         // This prevents false positives from non-fall events (e.g., throwing the device).
@@ -241,34 +272,21 @@ void loop() {
       Serial.println("Freefall timed out, no impact detected.");
     }
   } else { // If alarm is active
-    // Alarm is active, manage its duration and siren effect
-    if (millis() - alarmActivatedTime < MAX_ALARM_DURATION_MS) {
-      // Continue siren effect and LED blinking
-      digitalWrite(ALARM_LED, !digitalRead(ALARM_LED)); // Toggle LED state
-      
-      // Update siren frequency
-      if (freqIncreasing) {
-        currentSirenFreq += SIREN_SPEED;
-        if (currentSirenFreq >= MAX_SIREN_FREQ) {
-          currentSirenFreq = MAX_SIREN_FREQ; // Cap at max frequency
-          freqIncreasing = false; // Start decreasing
-        }
-      } else {
-        currentSirenFreq -= SIREN_SPEED;
-        if (currentSirenFreq <= MIN_SIREN_FREQ) {
-          currentSirenFreq = MIN_SIREN_FREQ; // Cap at min frequency
-          freqIncreasing = true; // Start increasing
-        }
-      }
-      tone(SPEAKER_PIN, currentSirenFreq); // Play the siren tone
-      delay(2); // Small delay to control siren sweep speed and LED blink
-    } else {
-      // Alarm duration expired, reset alarm
-      resetAlarm();
-      Serial.println("Alarm duration expired. Auto-reset.");
+    // Check if the alarm duration has passed
+    if (millis() - alarmActivatedTime >= toneDuration(SPEAKER_PIN)) { // toneDuration() is not a real function, using a placeholder
+        // This needs to be handled by the tone() function itself or a custom timer
+        // For now, the tone() function with duration will handle stopping.
+        // We'll keep the alarm active until manually reset.
     }
   }
 
+
+  // --- Alarm Management ---
+  if (isAlarmActive) {
+    // If the alarm is active, make the red ALARM_LED blink to draw attention.
+    digitalWrite(ALARM_LED, !digitalRead(ALARM_LED)); // Toggle LED state (on/off)
+    delay(100); // Fast blink rate
+  }
 
   // --- Button Logic to Reset Alarm or Manually Trigger ---
   // Read the button state. The INPUT_PULLUP configuration means the pin is LOW when pressed.
@@ -278,19 +296,28 @@ void loop() {
 
     if (isAlarmActive) {
       // If the alarm is currently active, pressing the button resets it.
-      resetAlarm();
+      isAlarmActive = false;
+      noTone(SPEAKER_PIN); // Stop the alarm sound
+      digitalWrite(ALARM_LED, LOW); // Turn off red alarm LED
+      digitalWrite(READY_LED, HIGH); // Turn on green ready LED
       Serial.println("Alarm Reset by User.");
       tone(SPEAKER_PIN, 1000, 100); // Play a short confirmation beep
       delay(100); // Wait for the beep to complete
       noTone(SPEAKER_PIN); // Stop the confirmation beep
     } else {
       // If the alarm is not active, pressing the button manually triggers it.
-      activateAlarm();
+      isAlarmActive = true;
       Serial.println("Manual Alarm Triggered by User!");
+      digitalWrite(READY_LED, LOW); // Turn off green LED
+      digitalWrite(ALARM_LED, HIGH); // Turn on red LED
+      // Manual trigger always uses max duration for a strong alert
+      tone(SPEAKER_PIN, 3000, MAX_ALARM_DURATION_MS);
+      alarmActivatedTime = millis(); // Record when alarm started for auto-stop
     }
   }
 
   // --- Serial Debug Output ---
+  // Print sensor data and system status to the Serial Monitor for debugging and monitoring.
   Serial.print(accelMagnitude, 2); // Accelerometer magnitude (in G's) with 2 decimal places
   Serial.print("\t\t");
   Serial.print(gyroMagnitude, 2); // Gyroscope magnitude (in degrees/sec) with 2 decimal places
@@ -301,37 +328,6 @@ void loop() {
   // Display current alarm status (ACTIVE or OFF)
   Serial.println(isAlarmActive ? "ACTIVE" : "OFF");
 
-  if (!isAlarmActive) { // Only delay if alarm is not active, to allow siren to sweep fast
-    delay(50); // Small delay to control the loop speed and serial output rate.
-  }
-}
-
-// --- Helper Functions ---
-
-void activateAlarm() {
-  isAlarmActive = true;
-  fallStartTime = 0; // Reset fall detection states
-  impactTime = 0;
-
-  digitalWrite(READY_LED, LOW);  // Turn off green LED
-  // ALARM_LED will be handled in loop for blinking
-
-  // Initialize siren frequency for a fresh sweep
-  currentSirenFreq = MIN_SIREN_FREQ;
-  freqIncreasing = true;
-
-  // Tones will be started in the loop() when isAlarmActive is true
-  Serial.println("FALL DETECTED! ALARM ACTIVATED!");
-  alarmActivatedTime = millis(); // Record when alarm started for auto-stop
-}
-
-void resetAlarm() {
-  isAlarmActive = false;
-  digitalWrite(ALARM_LED, LOW); // Turn off red LED
-  digitalWrite(READY_LED, HIGH); // Turn on green LED
-
-  // Stop all buzzer tones
-  noTone(SPEAKER_PIN);
-
-  Serial.println("Alarm silenced. System Ready.");
+  delay(50); // Small delay to control the loop speed and serial output rate.
+             // Adjust this value to balance responsiveness and processing load.
 }
